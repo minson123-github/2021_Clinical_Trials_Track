@@ -217,7 +217,6 @@ def get_train_dataloader(args):
 				all_tokenize['input_ids'].append(input_ids)
 				all_tokenize['attention_mask'].append(attention_mask)
 				all_tokenize['relevant'].append(relevant)
-		break
 	
 	# all_tokenize['input_ids'] = torch.LongTensor(all_tokenize['input_ids'])
 	# all_tokenize['attention_mask'] = torch.FloatTensor(all_tokenize['attention_mask'])
