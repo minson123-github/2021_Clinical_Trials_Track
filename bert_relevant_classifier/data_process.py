@@ -12,7 +12,7 @@ GLOBAL_MAX_POS = 4096
 
 class paragraphDataset(Dataset):
 	
-	def __init__(self, input_ids, attention_mask, is_relevant=None):
+	def __init__(self, input_ids, attention_mask, is_relevant):
 		self.input_ids = input_ids
 		self.attention_mask = attention_mask
 		self.label = is_relevant
@@ -21,8 +21,19 @@ class paragraphDataset(Dataset):
 		return len(self.input_ids)
 	
 	def __getitem__(self, idx):
-		if self.label == None:
-			return self.input_ids[idx], self.attention_mask[idx]
+		return self.input_ids[idx], self.attention_mask[idx], self.label[idx]
+
+class predictDataset(Dataset):
+	
+	def __init__(self, input_ids, attention_mask, doc_id):
+		self.input_ids = input_ids
+		self.attention_mask = attention_mask
+		self.doc_id = doc_id
+	
+	def __len__(self):
+		return len(self.input_ids)
+
+	def __getitem__(self, idx):
 		return self.input_ids[idx], self.attention_mask[idx], self.label[idx]
 
 def clear_dir(remove_dir):
@@ -31,6 +42,34 @@ def clear_dir(remove_dir):
 		for remove_file in remove_files:
 			remove_path = os.path.join(remove_dir, remove_file)
 			os.remove(remove_path)
+
+def tokenize_predict_paragraph(tokenizer, worker_id, query_terms):
+
+	### Load data via file ##########################################
+	with open('predict/part_{}.json'.format(worker_id), 'r') as fp:
+		predict_paragraph = json.load(fp)
+	#################################################################
+	tokenize_results = {'input_ids': [], 'attention_mask': [], 'doc_id': []}
+	for para, doc_id in tqdm(predict_paragraph, position=worker_id, leave=False):
+		para_tokenize = tokenizer(
+					query_terms, 
+					para,
+					padding='max_length',
+					truncation='only_second',
+					stride=256, 
+					return_tensors='np', 
+					return_attention_mask=True, 
+					return_overflowing_tokens=True)
+		
+		for tokens in para_tokenize['input_ids']:
+			tokenize_results['input_ids'].append(tokens.tolist())
+			tokenize_results['doc_id'].append(doc_id)
+
+		for tokens in para_tokenize['attention_mask']:
+			tokenize_results['attention_mask'].append(tokens.tolist())
+	
+	with open('predict_tokenize/part_{}.json'.format(worker_id), 'w') as fp:
+		json.dump(tokenize_results, fp)
 
 def tokenize_paragraph(tokenizer, worker_id, part_id):
 
@@ -126,6 +165,24 @@ def write_to_file(args, fid_list, save_path):
 				fid, content = contents[i][:-1], contents[i + 1][:-1]
 				if fid in fid_set:
 					file_contents.append(content)
+	
+	with open(save_path, 'w') as fp:
+		json.dump(file_contents, fp)
+
+def write_to_predict_file(args, fid_list, save_path):
+	fid_set = set(fid_list)
+	file_list = os.listdir(args['file_content'])
+	
+	file_contents = []
+	for file_name in file_list:
+		file_path = os.path.join(args['file_content'], file_name)
+
+		with open(file_path, 'r') as fp:
+			contents = fp.readlines()
+			for i in range(0, len(contents), 2):
+				fid, content = contents[i][:-1], contents[i + 1][:-1]
+				if fid in fid_set:
+					file_contents.append((content, fid))
 	
 	with open(save_path, 'w') as fp:
 		json.dump(file_contents, fp)
@@ -298,4 +355,54 @@ def get_train_dataloader(args):
 						)
 		return train_dataloader, None
 	
-# def get_test_dataloader(args):
+def get_test_dataloader(args, i):
+	# get i-th(0~29) query predict file id dataloader
+	with open(args['predict_relevance'], 'r') as fp:
+		predict_fids = fp.readlines()[i][:-1].split(' ')
+		with open(os.path.join(args['query_terms'], str(i + 1)), 'r') as fp:
+			query_terms = fp.readline()[:-1]
+	
+	refresh_dir('predict')
+	refresh_dir('predict_tokenize')
+	distri_workers = [None] * args['n_worker']
+	for idx, fid in enumerate(predict_fids):
+		worker_id = idx % args['n_worker']
+		if type(distri_workers[worker_id]) == type(None):
+			distri_workers[worker_id] = []
+		distri_workers[worker_id].append(fid)
+
+	for worker_id in range(args['n_worker']):
+		write_to_predict_file(args, distri_workers, 'predict/part_{}.json'.format(worker_id))
+	
+	tokenizer = RobertaTokenizerFast.from_pretrained(args['pretrained_model'], model_max_length=GLOBAL_MAX_POS)
+	
+	with ProcessPoolExecutor(max_workers=args['n_worker']) as executor:
+		futures = [executor.submit(tokenize_predict_paragraph, tokenizer, worker_id, query_terms) for worker_id in args['n_worker']]
+		for future in futures:
+			future.result()
+
+	tokenize_results = {'input_ids': [], 'attention_mask': [], 'doc_id': []}
+	for worker_id in tqdm(range(args['n_worker'])):
+		with open('predict_tokenize/part_{}.json', 'r') as fp:
+			part_tokenize = json.load(fp)	
+		for input_ids in part_tokenize['input_ids']:
+			tokenize_results['input_ids'].append(input_ids)
+		for attention_mask in part_tokenize['attention_mask']:
+			tokenize_results['attention_mask'].append(attention_mask)
+		for doc_id in part_tokenize['doc_id']:
+			tokenize_results['doc_id'].append(doc_id)
+	
+	test_dataset = predictDataset(
+						tokenize_results['input_ids'], 
+						tokenize_results['attention_mask'], 
+						tokenize_results['doc_id']
+					)
+	test_dataloader = DataLoader(
+						test_dataset, 
+						batch_size=args['batch_size'], 
+						shuffle=False, 
+						num_workers=4 * args['n_gpu'], 
+						pin_memory=True, 
+						persistent_workers=True, 
+					)
+	return test_dataloader

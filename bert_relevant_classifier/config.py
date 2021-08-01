@@ -18,5 +18,6 @@ def get_args():
 	parser.add_argument('--n_epoch', type=int, default=1, help='Number of epoch for training.')
 	parser.add_argument('--saving_steps', type=int, help='Number of step for saving model.')
 	parser.add_argument('--mode', type=str, help='Mode: train or test')
+	parser.add_argument('--predict_relevance', type=str, help='The file contains file id for predicting. For each query, the file id in the same line and split with whitespace.')
 	args = parser.parse_args()
 	return vars(args)
