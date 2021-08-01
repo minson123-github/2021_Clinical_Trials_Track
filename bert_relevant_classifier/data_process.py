@@ -6,6 +6,7 @@ import random
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import torch
+from transformers import RobertaTokenizerFast
 
 GLOBAL_MAX_POS = 4096
 
@@ -146,15 +147,21 @@ def refresh_dir(_dir):
 	clear_dir(_dir)
 
 def train_collate_fn(train_batch):
-	batch_input_ids, batch_attention_mask, batch_relevant = [], [], []
-	for input_ids, attention_mask, relevant in train_batch:
-		batch_input_ids.append(torch.LongTensor(input_ids).unsqueeze(0))
-		batch_attention_mask.append(torch.FloatTensor(attention_mask).unsqueeze(0))
-		batch_relevant.append(torch.FloatTensor([relevant]).unsqueeze(0))
+	# batch_input_ids, batch_attention_mask, batch_relevant = train_batch
+	batch_input_ids = [x for x, _, __ in train_batch]
+	batch_attention_mask = [x for _, x, __ in train_batch]
+	batch_relevant = [[x] for _, __, x in train_batch]
+	# for input_ids, attention_mask, relevant in train_batch:
+		# batch_input_ids.append(torch.LongTensor(input_ids).unsqueeze(0))
+		# batch_attention_mask.append(torch.FloatTensor(attention_mask).unsqueeze(0))
+		# batch_relevant.append(torch.FloatTensor([relevant]).unsqueeze(0))
 	
-	batch_input_ids = torch.cat(batch_input_ids, dim=0)
-	batch_attention_mask = torch.cat(batch_attention_mask, dim=0)
-	batch_relevant = torch.cat(batch_relevant, dim=0)
+	# batch_input_ids = torch.cat(batch_input_ids, dim=0)
+	# batch_attention_mask = torch.cat(batch_attention_mask, dim=0)
+	# batch_relevant = torch.cat(batch_relevant, dim=0)
+	batch_input_ids = torch.LongTensor(batch_input_ids)
+	batch_attention_mask = torch.FloatTensor(batch_attention_mask)
+	batch_relevant = torch.FloatTensor(batch_relevant)
 
 	return batch_input_ids, batch_attention_mask, batch_relevant
 
@@ -216,11 +223,26 @@ def get_train_dataloader(args):
 			for input_ids, attention_mask, relevant in zip(tokenize_results['input_ids'], tokenize_results['attention_mask'], tokenize_results['relevant']):
 				all_tokenize['input_ids'].append(input_ids)
 				all_tokenize['attention_mask'].append(attention_mask)
-				all_tokenize['relevant'].append(relevant)
+				all_tokenize['relevant'].append([relevant])
 	
-	# all_tokenize['input_ids'] = torch.LongTensor(all_tokenize['input_ids'])
-	# all_tokenize['attention_mask'] = torch.FloatTensor(all_tokenize['attention_mask'])
-	# all_tokenize['relevant'] = torch.LongTensor(all_tokenize['relevant'])
+	print('pre-split data into several batches.', flush=True)
+	data_size = len(all_tokenize['input_ids'])
+	batch_data = {'input_ids': [], 'attention_mask': [], 'relevant': []}
+	for i in tqdm(range(0, len(all_tokenize['input_ids']), args['batch_size'])):
+		if i + args['batch_size'] >= data_size:
+			break
+		batch_input_ids = all_tokenize['input_ids'][i: min(i + args['batch_size'], data_size)]
+		batch_attention_mask = all_tokenize['attention_mask'][i: min(i + args['batch_size'], data_size)]
+		batch_relevant = all_tokenize['relevant'][i: min(i + args['batch_size'], data_size)]
+		batch_data['input_ids'].append(batch_input_ids)
+		batch_data['attention_mask'].append(batch_attention_mask)
+		batch_data['relevant'].append(batch_relevant)
+	
+	all_tokenize = batch_data
+	
+	all_tokenize['input_ids'] = torch.LongTensor(all_tokenize['input_ids'])
+	all_tokenize['attention_mask'] = torch.FloatTensor(all_tokenize['attention_mask'])
+	all_tokenize['relevant'] = torch.FloatTensor(all_tokenize['relevant'])
 	# print(all_tokenize['input_ids'].size())
 	# print(all_tokenize['attention_mask'].size())
 	# print(all_tokenize['relevant'].size())
@@ -237,17 +259,23 @@ def get_train_dataloader(args):
 						all_tokenize['relevant'][int(dataset_size * (1 - args['eval_ratio'])): ])
 		train_dataloader = DataLoader(
 								train_dataset, 
-								batch_size=args['batch_size'], 
+								# batch_size=args['batch_size'], 
+								batch_size=1, 
 								shuffle=True, 
-								num_workers=4, 
-								collate_fn=train_collate_fn
+								num_workers=4 * args['n_gpu'], 
+								pin_memory=True, 
+								persistent_workers=True, 
+								# collate_fn=train_collate_fn
 							)
 		eval_dataloader = DataLoader(
 								eval_dataset, 
-								batch_size=args['batch_size'], 
+								# batch_size=args['batch_size'], 
+								batch_size=1, 
 								shuffle=False, 
-								num_workers=4, 
-								collate_fn=train_collate_fn
+								num_workers=4 * args['n_gpu'], 
+								pin_memory=True, 
+								persistent_workers=True, 
+								# collate_fn=train_collate_fn
 							)
 		return train_dataloader, eval_dataloader
 	else:
@@ -259,10 +287,14 @@ def get_train_dataloader(args):
 
 		train_dataloader = DataLoader(
 							train_dataset, 
-							batch_size=args['batch_size'], 
+							# batch_size=args['batch_size'], 
+							batch_size=1, 
 							shuffle=True, 
-							num_workers=4, 
-							collate_fn=train_collate_fn
+							num_workers=4 * args['n_gpu'], 
+							pin_memory=True, 
+							persistent_workers=True, 
+							# prefetch_factor=4, 
+							# collate_fn=train_collate_fn
 						)
 		return train_dataloader, None
 	
