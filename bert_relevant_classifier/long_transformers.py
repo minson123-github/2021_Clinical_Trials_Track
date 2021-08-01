@@ -1,5 +1,7 @@
 from transformers import RobertaForMaskedLM 
 from transformers.modeling_longformer import LongformerSelfAttention
+# from transformers import LongformerSelfAttention
+
 
 class RobertaLongSelfAttention(LongformerSelfAttention):
     def forward(
