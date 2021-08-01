@@ -1,4 +1,5 @@
 import os
+import torch
 from config import get_args
 from model import relevantClassifier
 from data_process import get_train_dataloader
@@ -62,9 +63,46 @@ def train(args):
 	else:
 		trainer.fit(model, train_dataloader)
 
+def test(args):
+	n_query = len(os.listdir(args['query_terms']))
+	
+	# model = relevantClassifier(args)
+	model_save_path = os.path.join(args['model_dir'], 'model')
+	model = relevantClassifier.load_from_checkpoint(model_save_path)
+	device_ids = [gpu_id for gpu_id in range(args['n_gpu'])]
+	model = torch.nn.DataParallel(model, device_ids)
+	model.to('cuda:0')
+
+	predict_results = []
+
+	with torch.no_grad():
+		for qid in tqdm(range(n_query), position=0, desc='all-query'):
+			test_dataloader = get_test_dataloader(args, qid)
+			doc_scores = {}
+			for input_ids, attention_mask, doc_ids in tqdm(test_dataloader, position=1, desc='predict', leave=False):
+				input_ids = torch.LongTensor(input_ids, device='cuda')
+				attention_mask = torch.FloatTensor(attention_mask, device='cuda')
+				logits = model((input_ids, attention_mask))
+				relevant_scores = torch.sigmoid(logits)
+				for score, doc_id in zip(relevant_scores, doc_ids):
+					if doc_id not in doc_scores:
+						doc_scores[doc_id] = 0
+					doc_scores[doc_id] += score.item()
+			doc_scores = [k for k, v in sorted(doc_scores.items(), key=lambda item: item[1], reverse=True)
+			for idx in range(args['n_relevance']):
+				pred = doc_scores[idx]
+				predict_results.append(pred)
+	
+	print('start to saving predict results.', flush=True)
+	with open(args['predict_file'], 'w') as fp:
+		for qid, pred in enumerate(predict_results):
+			for doc_id in pred:
+				fp.write('{} {}\n'.format(qid + 1, doc_id))
+	print('write predict results finished.', flush=True)
+
 if __name__ == '__main__':
 	args = get_args()
 	if args['mode'] == 'train':
 		train(args)
 	if args['mode'] == 'test':
-		pass
+		test(args)
