@@ -20,7 +20,7 @@ class RobertaClassificationHead(nn.Module):
         x = torch.relu(x)
         x = self.dropout(x)
         x = self.out_proj(x)
-        x = torch.sigmoid(x)
+		# x = torch.sigmoid(x)
         return x
 
 class relevantClassifier(pl.LightningModule):
@@ -41,6 +41,7 @@ class relevantClassifier(pl.LightningModule):
 										torch.nn.Sigmoid()
 									)
 		'''
+		self.loss = torch.nn.BCEWithLogitsLoss()
 		self.save_hyperparameters()
 	
 	def forward(self, batch):
@@ -51,8 +52,12 @@ class relevantClassifier(pl.LightningModule):
 	
 	def training_step(self, batch, batch_idx):
 		input_ids, attention_mask, label = batch
+		input_ids = torch.squeeze(input_ids)
+		attention_mask = torch.squeeze(attention_mask)
+		label = torch.squeeze(label, dim=0)
 		outputs = self.forward((input_ids, attention_mask))
-		loss = torch.nn.functional.binary_cross_entropy(outputs, label)
+		# loss = torch.nn.functional.binary_cross_entropy(outputs, label)
+		loss = self.loss(outputs, label)
 		pred = [1 if output > 0.5 else 0 for output in outputs]
 		succ_pred = sum([1 if p == r else 0 for p, r in zip(pred, label)])
 		# self.log('train_loss', loss, prog_bar=True)
@@ -61,8 +66,12 @@ class relevantClassifier(pl.LightningModule):
 	
 	def validation_step(self, batch, batch_idx):
 		input_ids, attention_mask, label = batch
+		input_ids = torch.squeeze(input_ids)
+		attention_mask = torch.squeeze(attention_mask)
+		label = torch.squeeze(label, dim=0)
 		outputs = self.forward((input_ids, attention_mask))
-		loss = torch.nn.functional.binary_cross_entropy(outputs, label)
+		# loss = torch.nn.functional.binary_cross_entropy(outputs, label)
+		loss = self.loss(outputs, label)
 		pred = [1 if output > 0.5 else 0 for output in outputs]
 		succ_pred = sum([1 if p == r else 0 for p, r in zip(pred, label)])
 		# self.log('eval_loss', loss, prog_bar=True)
@@ -70,5 +79,5 @@ class relevantClassifier(pl.LightningModule):
 		return loss
 
 	def configure_optimizers(self):
-		optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+		optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
 		return optimizer
