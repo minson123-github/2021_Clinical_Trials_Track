@@ -19,7 +19,7 @@ def get_args():
 	parser.add_argument('--saving_steps', type=int, help='Number of step for saving model.')
 	parser.add_argument('--mode', type=str, help='Mode: train or test')
 	parser.add_argument('--predict_relevance', type=str, help='The file contains file id for predicting. For each query, the file id in the same line and split with whitespace.')
-	parser.add_argument('--n_relevance', type=int, help='Find top n_relevance relevantest file in predict phase.')
+	# parser.add_argument('--n_relevance', type=int, help='Find top n_relevance relevantest file in predict phase.')
 	parser.add_argument('--predict_file', type=str, help='The file records predict top n_relevance file relevantest file id.')
 	args = parser.parse_args()
 	return vars(args)

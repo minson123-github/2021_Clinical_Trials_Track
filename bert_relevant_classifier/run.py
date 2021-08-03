@@ -1,10 +1,13 @@
 import os
 import torch
+from tqdm import tqdm
 from config import get_args
+from data_process import get_train_dataloader, get_test_dataloader
 from model import relevantClassifier
-from data_process import get_train_dataloader
 from pytorch_lightning import Trainer, seed_everything, Callback
+import pytorch_lightning as pl
 from fairscale.nn import checkpoint_wrapper, auto_wrap, wrap
+# import torch.multiprocessing
 
 class CheckpointEveryNSteps(Callback):
 	def __init__(self, save_freq, save_dir):
@@ -64,34 +67,51 @@ def train(args):
 		trainer.fit(model, train_dataloader)
 
 def test(args):
+	# torch.multiprocessing.set_sharing_strategy('file_system')
 	n_query = len(os.listdir(args['query_terms']))
 	
-	# model = relevantClassifier(args)
-	model_save_path = os.path.join(args['model_dir'], 'model')
+	model_save_path = os.path.join(args['model_dir'], 'checkpoints', 'checkpoint_5.ckpt')
 	model = relevantClassifier.load_from_checkpoint(model_save_path)
+	print(isinstance(model, pl.LightningModule))
+	'''
 	device_ids = [gpu_id for gpu_id in range(args['n_gpu'])]
 	model = torch.nn.DataParallel(model, device_ids)
 	model.to('cuda:0')
 
 	predict_results = []
 
+	model.eval()
 	with torch.no_grad():
 		for qid in tqdm(range(n_query), position=0, desc='all-query'):
 			test_dataloader = get_test_dataloader(args, qid)
-			doc_scores = {}
-			for input_ids, attention_mask, doc_ids in tqdm(test_dataloader, position=1, desc='predict', leave=False):
-				input_ids = torch.LongTensor(input_ids, device='cuda')
-				attention_mask = torch.FloatTensor(attention_mask, device='cuda')
-				logits = model((input_ids, attention_mask))
+			doc_scores, doc_cnt = {}, {}
+			for (input_ids, attention_mask, doc_ids) in tqdm(test_dataloader, position=1, desc='predict', leave=False):
+				logits = model((input_ids.cuda(), attention_mask.cuda()))
 				relevant_scores = torch.sigmoid(logits)
 				for score, doc_id in zip(relevant_scores, doc_ids):
 					if doc_id not in doc_scores:
 						doc_scores[doc_id] = 0
+						doc_cnt[doc_id] = 0
 					doc_scores[doc_id] += score.item()
-			doc_scores = [k for k, v in sorted(doc_scores.items(), key=lambda item: item[1], reverse=True)
-			for idx in range(args['n_relevance']):
-				pred = doc_scores[idx]
-				predict_results.append(pred)
+					doc_cnt[doc_id] += 1
+			doc_scores = [k for k, v in sorted(doc_scores.items(), key=lambda item: item[1] / doc_cnt[item[0]], reverse=True)]
+			predict_results.append(doc_scores)
+	'''
+	
+	trainer = Trainer(
+					deterministic=True, 
+					gpus=args['n_gpu'], 
+					num_nodes=1, 
+					#accelerator="ddp", 
+					#plugins="ddp_sharded", 
+				)
+
+	predict_results = []
+	for qid in range(n_query):
+		test_dataloader = get_test_dataloader(args, qid)
+		doc_scores = trainer.test(model, test_dataloader)
+		print(doc_scores, flush=True)
+		predict_results.append(doc_scores)
 	
 	print('start to saving predict results.', flush=True)
 	with open(args['predict_file'], 'w') as fp:

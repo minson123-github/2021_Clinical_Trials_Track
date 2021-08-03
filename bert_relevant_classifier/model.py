@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import pytorch_lightning as pl
 from long_transformers import RobertaLongForMaskedLM
+from transformers import RobertaConfig
 # from transformers import RobertaClassificationHead
 
 class RobertaClassificationHead(nn.Module):
@@ -30,6 +31,7 @@ class relevantClassifier(pl.LightningModule):
 		self.lr = args['lr']
 		self.BERT_encoder = RobertaLongForMaskedLM.from_pretrained(args['pretrained_model'], output_hidden_states=True, gradient_checkpointing=True)
 		self.binaryClassifier = RobertaClassificationHead(self.BERT_encoder.config)
+
 		# self.init_weights()
 		'''
 			self.binaryClassifier = torch.nn.Sequential(
@@ -77,6 +79,24 @@ class relevantClassifier(pl.LightningModule):
 		# self.log('eval_loss', loss, prog_bar=True)
 		self.log('acc', succ_pred / len(label), prog_bar=True)
 		return loss
+	
+	def test_step(self, batch, batch_idx):
+		input_ids, attention_mask, doc_id = batch
+		logits = self.forward((input_ids, attention_mask))
+		scores = torch.sigmoid(logits)
+		all_pred = [(score, doc_id) for score, doc_id in zip(scores, doc_id)]
+		doc_score, doc_cnt = {}, {}
+		for score, doc_id in all_pred:
+			if doc_id not in doc_score:
+				doc_score[doc_id] = 0
+				doc_cnt[doc_id] = 0
+			doc_score[doc_id] += score.item()
+			doc_cnt[doc_id] += 1
+
+		avg_scores = [(k, v / doc_cnt[k]) for k, v in doc_score.items()]
+		relevance_order = [k for k, v in sorted(avg_scores, key=lambda score: score[1], reverse=True)]
+		return {'order': 0.25}
+		return {'order': relevance_order}
 
 	def configure_optimizers(self):
 		optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)

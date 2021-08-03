@@ -7,6 +7,7 @@ from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import torch
 from transformers import RobertaTokenizerFast
+from tokenizers import AddedToken
 
 GLOBAL_MAX_POS = 4096
 
@@ -34,7 +35,7 @@ class predictDataset(Dataset):
 		return len(self.input_ids)
 
 	def __getitem__(self, idx):
-		return self.input_ids[idx], self.attention_mask[idx], self.label[idx]
+		return self.input_ids[idx], self.attention_mask[idx], self.doc_id[idx]
 
 def clear_dir(remove_dir):
 	if os.path.exists(remove_dir):
@@ -50,7 +51,7 @@ def tokenize_predict_paragraph(tokenizer, worker_id, query_terms):
 		predict_paragraph = json.load(fp)
 	#################################################################
 	tokenize_results = {'input_ids': [], 'attention_mask': [], 'doc_id': []}
-	for para, doc_id in tqdm(predict_paragraph, position=worker_id, leave=False):
+	for para, doc_id in tqdm(predict_paragraph, position=worker_id + 1, leave=False):
 		para_tokenize = tokenizer(
 					query_terms, 
 					para,
@@ -170,22 +171,26 @@ def write_to_file(args, fid_list, save_path):
 		json.dump(file_contents, fp)
 
 def write_to_predict_file(args, fid_list, save_path):
-	fid_set = set(fid_list)
+	fid_set = [set(worker_list) for worker_list in fid_list]
 	file_list = os.listdir(args['file_content'])
 	
-	file_contents = []
-	for file_name in file_list:
+	file_contents = [None] * len(save_path)
+	for i in range(len(save_path)):
+		file_contents[i] = []
+	for file_name in tqdm(file_list, position=1, leave=False, desc='write-content'):
 		file_path = os.path.join(args['file_content'], file_name)
 
 		with open(file_path, 'r') as fp:
 			contents = fp.readlines()
 			for i in range(0, len(contents), 2):
 				fid, content = contents[i][:-1], contents[i + 1][:-1]
-				if fid in fid_set:
-					file_contents.append((content, fid))
+				for worker_id in range(len(save_path)):
+					if fid in fid_set[worker_id]:
+						file_contents[worker_id].append((content, fid))
 	
-	with open(save_path, 'w') as fp:
-		json.dump(file_contents, fp)
+	for worker_id in range(len(save_path)):
+		with open(save_path[worker_id], 'w') as fp:
+			json.dump(file_contents[worker_id], fp)
 
 def check_utility_info(_dir):
 	if not os.path.exists(_dir):
@@ -221,6 +226,17 @@ def train_collate_fn(train_batch):
 	batch_relevant = torch.FloatTensor(batch_relevant)
 
 	return batch_input_ids, batch_attention_mask, batch_relevant
+
+def test_collate_fn(test_batch):
+	batch_input_ids, batch_attention_mask, batch_doc_ids = [], [], []
+	for input_ids, attention_mask, doc_id in test_batch:
+		batch_input_ids.append(input_ids)
+		batch_attention_mask.append(attention_mask)
+		batch_doc_ids.append(doc_id)
+
+	batch_input_ids = torch.LongTensor(batch_input_ids)
+	batch_attention_mask = torch.FloatTensor(batch_attention_mask)
+	return batch_input_ids, batch_attention_mask, batch_doc_ids
 
 def get_train_dataloader(args):
 	random.seed(args['seed']) # fix random seed
@@ -259,7 +275,17 @@ def get_train_dataloader(args):
 		
 		print('Start to tokenize paragraph data parallelly.', flush=True)
 		part_idx = 0
-		tokenizer = RobertaTokenizerFast.from_pretrained(args['pretrained_model'], model_max_length=GLOBAL_MAX_POS)
+		tokenizer = RobertaTokenizerFast.from_pretrained(
+						args['pretrained_model'], 
+						model_max_length=GLOBAL_MAX_POS, 
+						bos_token='<s>', 
+						eos_token='</s>', 
+						unk_token='<unk>', 
+						sep_token='</s>', 
+						pad_token='<pad>', 
+						cls_token='<s>', 
+						mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
+					)
 
 		with ProcessPoolExecutor(max_workers=args['n_worker']) as executor:
 			while part_idx < len(relevant_fid):
@@ -365,25 +391,35 @@ def get_test_dataloader(args, i):
 	refresh_dir('predict')
 	refresh_dir('predict_tokenize')
 	distri_workers = [None] * args['n_worker']
-	for idx, fid in enumerate(predict_fids):
+	for idx, fid in enumerate(predict_fids[: 80]):
 		worker_id = idx % args['n_worker']
 		if type(distri_workers[worker_id]) == type(None):
 			distri_workers[worker_id] = []
 		distri_workers[worker_id].append(fid)
+	tokenizer = RobertaTokenizerFast.from_pretrained(
+					args['pretrained_model'], 
+					model_max_length=GLOBAL_MAX_POS, 
+					bos_token='<s>', 
+					eos_token='</s>', 
+					unk_token='<unk>', 
+					sep_token='</s>', 
+					pad_token='<pad>', 
+					cls_token='<s>', 
+					mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
+				)
 
-	for worker_id in range(args['n_worker']):
-		write_to_predict_file(args, distri_workers, 'predict/part_{}.json'.format(worker_id))
+	save_path = ['predict/part_{}.json'.format(worker_id) for worker_id in range(args['n_worker'])]
+	write_to_predict_file(args, distri_workers, save_path)
 	
-	tokenizer = RobertaTokenizerFast.from_pretrained(args['pretrained_model'], model_max_length=GLOBAL_MAX_POS)
 	
 	with ProcessPoolExecutor(max_workers=args['n_worker']) as executor:
-		futures = [executor.submit(tokenize_predict_paragraph, tokenizer, worker_id, query_terms) for worker_id in args['n_worker']]
+		futures = [executor.submit(tokenize_predict_paragraph, tokenizer, worker_id, query_terms) for worker_id in range(args['n_worker'])]
 		for future in futures:
 			future.result()
 
 	tokenize_results = {'input_ids': [], 'attention_mask': [], 'doc_id': []}
-	for worker_id in tqdm(range(args['n_worker'])):
-		with open('predict_tokenize/part_{}.json', 'r') as fp:
+	for worker_id in tqdm(range(args['n_worker']), position=1, leave=False, desc='combine'):
+		with open('predict_tokenize/part_{}.json'.format(worker_id), 'r') as fp:
 			part_tokenize = json.load(fp)	
 		for input_ids in part_tokenize['input_ids']:
 			tokenize_results['input_ids'].append(input_ids)
@@ -393,9 +429,9 @@ def get_test_dataloader(args, i):
 			tokenize_results['doc_id'].append(doc_id)
 	
 	test_dataset = predictDataset(
-						tokenize_results['input_ids'], 
-						tokenize_results['attention_mask'], 
-						tokenize_results['doc_id']
+						tokenize_results['input_ids'][: 80], 
+						tokenize_results['attention_mask'][: 80], 
+						tokenize_results['doc_id'][: 80]
 					)
 	test_dataloader = DataLoader(
 						test_dataset, 
@@ -404,5 +440,6 @@ def get_test_dataloader(args, i):
 						num_workers=4 * args['n_gpu'], 
 						pin_memory=True, 
 						persistent_workers=True, 
+						collate_fn=test_collate_fn
 					)
 	return test_dataloader
