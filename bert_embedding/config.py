@@ -17,7 +17,7 @@ def get_config():
 	parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate for training.')
 	parser.add_argument('--n_epoch', type=int, default=1, help='Number of epoch for training.')
 	# parser.add_argument('--update_freq', type=int, help='Frequency of update fixed model.')
-	parser.add_argument('--mode', type=str, help='Mode: train or predict')
+	parser.add_argument('--mode', type=str, help='Mode: train or embedding')
 	parser.add_argument('--batch_size', type=int, help='Batch size for training.')
 	args = parser.parse_args()
 	return vars(args)

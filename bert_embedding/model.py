@@ -30,9 +30,10 @@ class embeddingNet(pl.LightningModule):
 		return loss
 	
 	def predict_step(self, batch, batch_idx):
-		input_ids = batch
-		emb = self.forward(input_ids)
-		return emb
+		input_ids, doc_id = batch
+		preds = self.forward(input_ids)
+		emb = [[x.item() for x in pred] for pred in preds]
+		return emb, doc_id
 	
 	def configure_optimizers(self):
 		optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)

@@ -24,6 +24,17 @@ class trainDataset(Dataset):
 	def __getitem__(self, idx):
 		return self.input_ids[idx], self.query_input_ids[idx], self.target[idx]
 
+class embeddingDataset(Dataset):
+	def __init__(self, input_ids, doc_id):
+		self.input_ids = torch.LongTensor(input_ids)
+		self.doc_id = doc_id
+	
+	def __len__(self):
+		return len(self.input_ids)
+	
+	def __getitem__(self, idx):
+		return self.input_ids[idx], self.doc_id[idx]
+
 def get_file_ids(args):
 	file_list = os.listdir(args['file_content'])
 	file_ids = []
@@ -89,6 +100,29 @@ def check_dir(_dir, n_query):
 			return False
 	return True
 
+def embedding_dataset_tokenize(tokenizer, file_path, worker_id, part_id):
+	with open(file_path, 'r') as fp:
+		file_contents = fp.readlines()
+	
+	results = {'doc_id': [], 'input_ids': []}
+	for i in tqdm(range(0, len(file_contents), 2), leave=False, position=worker_id + 1, desc='Worker-{}'.format(worker_id)):
+		file_id, file_content = file_contents[i][:-1], file_contents[i + 1][:-1]
+		doc_tokenize = tokenizer(
+						file_content, 
+						padding='max_length', 
+						truncation=True,
+						stride=256, 
+						return_tensors='np', 
+						return_overflowing_tokens=True
+					).input_ids
+
+		for input_ids in doc_tokenize:
+			results['doc_id'].append(file_id)
+			results['input_ids'].append(input_ids.tolist())
+	
+	with open('embedding_tokenize/part_{}.json'.format(part_id), 'w') as fp:
+		json.dump(results, fp)
+
 def train_dataset_tokenize(tokenizer, query_terms, worker_id, part_id):
 	with open('relevant/part_{}.json'.format(part_id), 'r') as fp:
 		relevant = json.load(fp)
@@ -142,6 +176,10 @@ def train_dataset_tokenize(tokenizer, query_terms, worker_id, part_id):
 def train_collate_fn(batch):
 	batch_input_ids, batch_query_input_ids, batch_target = zip(*batch)
 	return torch.stack(batch_input_ids), torch.stack(batch_query_input_ids), torch.stack(batch_target)
+
+def embedding_collate_fn(batch):
+	batch_input_ids, batch_doc_ids = zip(*batch)
+	return torch.stack(batch_input_ids), batch_doc_ids
 
 def get_train_dataloader(args):
 	random.seed(args['seed'])
@@ -228,3 +266,77 @@ def get_train_dataloader(args):
 						collate_fn=train_collate_fn
 					)
 	return train_dataloader
+
+def get_embedding_dataloader(args, pid):
+	file_list = os.listdir(args['file_content'])
+	file_list = sorted(file_list, key=lambda filename: int(filename))
+	print('Number of file part: {}'.format(len(file_list)), flush=True)
+	tokenizer = RobertaTokenizerFast.from_pretrained(
+					args['pretrained_model'], 
+					model_max_length=GLOBAL_MAX_POS, 
+					bos_token='<s>', 
+					eos_token='</s>', 
+					unk_token='<unk>', 
+					sep_token='</s>', 
+					pad_token='<pad>', 
+					cls_token='<s>', 
+					mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
+				)
+
+	if not check_dir('embedding_tokenize', len(file_list)):
+		refresh_dir('embedding_tokenize')
+		part_id = 0
+		with ProcessPoolExecutor(max_workers=args['n_worker']) as executor:
+			for i in tqdm(range(0, len(file_list), args['n_worker']), position=0, leave=False, desc='tokenize'):
+				batch_files = file_list[i: min(i + args['n_worker'], len(file_list))]
+				futures = []
+				for worker_id, filename in enumerate(batch_files):
+					file_path = os.path.join(args['file_content'], filename)
+					future = executor.submit(embedding_dataset_tokenize, tokenizer, file_path, worker_id, part_id)
+					part_id += 1
+					futures.append(future)
+			
+				for future in futures:
+					future.result()
+
+	tokenize = {'doc_id': [], 'input_ids': []}
+	if pid == "query":	
+		query_terms_list = os.listdir(args['query_parsed'])
+		query_terms_list = sorted(query_terms_list, key=lambda filename: int(filename))
+
+		for query_file in query_terms_list:
+			file_path = os.path.join(args['query_parsed'], query_file)
+			with open(file_path, 'r') as fp:
+				query_term = fp.readline()[:-1]
+
+			query_input_ids = tokenizer(
+								query_term, 
+								padding='max_length', 
+								truncation=True, 
+								stride=256, 
+								return_tensors='np', 
+								return_overflowing_tokens=True
+							).input_ids
+
+			for input_ids in query_input_ids:
+				tokenize['doc_id'].append(query_file)
+				tokenize['input_ids'].append(input_ids)
+	else:
+		with open('embedding_tokenize/part_{}.json'.format(pid), 'r') as fp:
+			tokenize = json.load(fp)	
+	
+	embedding_dataset = embeddingDataset(
+							tokenize['input_ids'], 
+							tokenize['doc_id']
+						)
+
+	embedding_dataloader = DataLoader(
+						embedding_dataset, 
+						batch_size=args['batch_size'], 
+						shuffle=False, 
+						num_workers=4 * args['n_gpu'], 
+						pin_memory=True, 
+						persistent_workers=True, 
+						collate_fn=embedding_collate_fn
+					)
+	return embedding_dataloader
