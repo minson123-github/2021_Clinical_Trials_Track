@@ -267,7 +267,7 @@ def get_train_dataloader(args):
 					)
 	return train_dataloader
 
-def get_embedding_dataloader(args, pid):
+def get_embedding_dataset(args, pid):
 	file_list = os.listdir(args['file_content'])
 	file_list = sorted(file_list, key=lambda filename: int(filename))
 	print('Number of file part: {}'.format(len(file_list)), flush=True)
@@ -330,13 +330,4 @@ def get_embedding_dataloader(args, pid):
 							tokenize['doc_id']
 						)
 
-	embedding_dataloader = DataLoader(
-						embedding_dataset, 
-						batch_size=args['batch_size'], 
-						shuffle=False, 
-						num_workers=4 * args['n_gpu'], 
-						pin_memory=True, 
-						persistent_workers=True, 
-						collate_fn=embedding_collate_fn
-					)
-	return embedding_dataloader
+	return embedding_dataset

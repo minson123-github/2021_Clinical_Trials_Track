@@ -4,12 +4,16 @@ import torch
 import pickle
 from tqdm import tqdm
 from config import get_config
-from data_process import get_train_dataloader, get_embedding_dataloader, refresh_dir
+from data_process import get_train_dataloader, get_embedding_dataset, refresh_dir, embedding_collate_fn
 from pytorch_lightning import Trainer, seed_everything, Callback
 from model import embeddingNet
 from pytorch_lightning.plugins.training_type import DDPShardedPlugin
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from inferenceSampler import SequentialDistributedSampler
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
+# os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
 class CheckpointEveryNSteps(Callback):
 	def __init__(self, save_freq, save_dir):
@@ -33,69 +37,103 @@ def normalize(v):
 def sum_vec(vec1, vec2):
 	return [x + y for x, y in zip(vec1, vec2)]
 
-def part_embedding(args, trainer, model, pid):
-	embedding_dataloader = get_embedding_dataloader(args, pid)
-	with torch.no_grad():
-		embedding = trainer.predict(model, embedding_dataloader)
-	'''
-		model.to('cuda')
-		model.eval()
-		embedding = []
-		with torch.no_grad():
-			for input_ids, doc_id in tqdm(embedding_dataloader, position=0, desc='predict'):
-				emb = model(input_ids.cuda()).cpu().detach().numpy().tolist()
-				embedding.append((emb, doc_id))
-	'''
+def sub_embedding(rank, ckpt_path, world_size, is_half, batch_size):
+	dist.init_process_group('nccl', rank=rank, world_size=world_size)
+	torch.cuda.set_device(rank)
+	device = torch.device('cuda', rank)
 
-	'''
-	if model.global_rank != 0:
-		sys.exit(0)
-	'''
+	model = embeddingNet.load_from_checkpoint(ckpt_path)
+	if is_half:
+		model.half()
+	model.to(device)
+	model = DDP(model, device_ids=[rank], output_device=rank)
 	
-	doc_emb, doc_cnt = {}, {}
+	with open('shared/dataset.pickle', 'rb') as fp:
+		test_dataset = pickle.load(fp)
+	test_sampler = SequentialDistributedSampler(test_dataset, batch_size=batch_size)
+	test_dataloader = torch.utils.data.DataLoader(
+						test_dataset, 
+						batch_size=batch_size, 
+						sampler=test_sampler, 
+						pin_memory=True, 
+						num_worker=4, 
+						collate_fn=embedding_collate_fn
+					)
+	
+	avg_emb, n_seq = {}, {}
 
-	for batch_embedding, batch_doc_ids in embedding:
-		for emb, doc_id in zip(batch_embedding, batch_doc_ids):
-			unit_emb = normalize(emb)
-			if doc_id not in doc_emb:
-				doc_emb[doc_id] = unit_emb
-				doc_cnt[doc_id] = 1
-			else:
-				doc_emb[doc_id] = sum_vec(doc_emb[doc_id], unit_emb)
-				doc_cnt[doc_id] += 1
+	predicts = []
+	with torch.no_grad():
+		for input_ids, doc_ids in tqdm(test_dataloader, position=rank + 1, leave=False, desc='GPU-{}'.format(rank)):
+			preds = model(input_ids.cuda())
+			embeddings = [[x.item() for x in pred] for pred in preds]
+			for emb, doc_id in zip(embeddings, doc_ids):
+				unit_emb = normalize(emb)
+				predicts.append((unit_emb, doc_id))
+	
+	with open('shared/pred_{}.pickle'.format(rank), 'wb') as fp:
+		pickle.dump(predicts, fp)
+
+def combine_predict():
+	pred_files = []
+	for filename in os.listdir('shared'):
+		if filename[0:5] == 'pred_':
+			pred_files.append(filename)
+
+	pred_files = sorted(pred_files, key=lambda filename: int(filename[5:-7])) # sort by process rank
+	full_pred = []
+	for filename in tqdm(pred_files, position=0, leave=False, desc='combine'):
+		file_path = os.path.join('shared', filename)
+		with open(file_path, 'rb') as fp:
+			part_pred = pickle.load(fp)
+		for p in part_pred:
+			full_pred.append(p)
+	
+	avg_emb, n_seq = {}, {}
+	for emb, doc_id in full_pred:
+		if doc_id not in avg_emb:
+			avg_emb[doc_id] = emb
+			n_seq[doc_id] = 1
+		else:
+			avg_emb[doc_id] = sum_vec(avg_emb[doc_id], emb)
+			n_seq[doc_id] += 1
 	
 	result = {}
-	for k, v in doc_emb.items():
-		avg_emb = [x / doc_cnt[k] for x in v]
-		result[k] = avg_emb
-	
+	for k, v in avg_emb.items():
+		d = n_seq[k]
+		result[k] = [x / d for x in v]
 	return result
 
 def embedding(args):
-	model = embeddingNet.load_from_checkpoint(os.path.join(args['model_dir'], 'checkpoints', 'checkpoint1_2.ckpt'))
-	trainer = Trainer(
-					deterministic=True, 
-					gpus=args['n_gpu'], 
-					num_nodes=1, 
-					accelerator="ddp", 
-					plugins=DDPShardedPlugin(), 
-				)
+	ckpt_path = 'embedding_model.ckpt'
 	if not os.path.exists('embedding'):
 		os.makedirs('embedding')
-	if not os.path.exists('embedding/query.pickle'):
-		query_embedding = part_embedding(args, trainer, model, "query")
-		if model.global_rank == 0:
-			with open('embedding/query.pickle', 'wb') as fp:
-				pickle.dump(query_embedding, fp)
+	if not os.path.exists('embedding/query'):
+		query_dataset = get_embedding_dataset(args, 'query')
+		refresh_dir('shared')
+		mp.spawn(
+					sub_embedding, 
+					args=(ckpt_path, args['n_gpu'], False, args['batch_size']), 
+					nproc=args['n_gpu'], 
+					join=True
+				)
+		predict = combine_predict()
+		with open('embedding/query.pickle', 'wb') as fp:
+			pickle.dump(predict, fp)
 	
-	n_part = len(os.listdir(args['file_content']))
-	for pid in range(n_part):
-		if not os.path.exists('embedding/part_{}.pickle'.format(pid)):
-			print('start to embedding part {}/{}'.format(pid + 1, n_part), flush=True)
-			_part = part_embedding(args, trainer, model, pid)
-			if model.global_rank == 0:
-				with open('embedding/part_{}.pickle'.format(pid), 'wb') as fp:
-					pickle.dump(_part, fp)
+	n_part = os.listdir('embedding_tokenize')
+	for pid in tqdm(range(n_part), leave=False, position=0, 'total'):
+		part_dataset = get_embedding_dataset(args, pid)
+		refresh_dir('shared')
+		mp.spawn(
+					sub_embedding, 
+					args=(ckpt_path, args['n_gpu'], False, args['batch_size']), 
+					nproc=args['n_gpu'], 
+					join=True
+				)
+		predict = combine_predict()
+		with open('embedding/part_{}.pickle'.format(pid), 'wb') as fp:
+			pickle.dump(predict, fp)
 
 def train(args):
 	seed_everything(args['seed'], workers=True)
