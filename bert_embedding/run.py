@@ -9,11 +9,16 @@ from pytorch_lightning import Trainer, seed_everything, Callback
 from model import embeddingNet
 from pytorch_lightning.plugins.training_type import DDPShardedPlugin
 import torch.distributed as dist
+
 from torch.nn.parallel import DistributedDataParallel as DDP
 from inferenceSampler import SequentialDistributedSampler
+import torch.multiprocessing as mp
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
-# os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+# os.environ["MASTER_ADDR"] = "140.112.31.65"
+# os.environ["MASTER_ADDR"] = "127.0.0.1"
+# os.environ["MASTER_PORT"] = "25487"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
 class CheckpointEveryNSteps(Callback):
 	def __init__(self, save_freq, save_dir):
@@ -37,16 +42,21 @@ def normalize(v):
 def sum_vec(vec1, vec2):
 	return [x + y for x, y in zip(vec1, vec2)]
 
-def sub_embedding(rank, ckpt_path, world_size, is_half, batch_size):
-	dist.init_process_group('nccl', rank=rank, world_size=world_size)
+def sub_embedding(rank, offset, ckpt_path, world_size, is_half, batch_size):
+	torch.distributed.init_process_group('nccl', init_method='file:///home/mxshi/ddp-shared/sharedfile', rank=offset + rank, world_size=world_size)
+	print('initial rank {} process'.format(torch.distributed.get_rank()), flush=True)
+	# dist.barrier()
 	torch.cuda.set_device(rank)
 	device = torch.device('cuda', rank)
 
 	model = embeddingNet.load_from_checkpoint(ckpt_path)
-	if is_half:
-		model.half()
+	#if is_half:
+	model.half()
 	model.to(device)
+	# print('Setting DDP...', flush=True)
 	model = DDP(model, device_ids=[rank], output_device=rank)
+	# print('Setting finished...', flush=True)
+	model.eval()
 	
 	with open('shared/dataset.pickle', 'rb') as fp:
 		test_dataset = pickle.load(fp)
@@ -56,7 +66,7 @@ def sub_embedding(rank, ckpt_path, world_size, is_half, batch_size):
 						batch_size=batch_size, 
 						sampler=test_sampler, 
 						pin_memory=True, 
-						num_worker=4, 
+						num_workers=4, 
 						collate_fn=embedding_collate_fn
 					)
 	
@@ -71,7 +81,7 @@ def sub_embedding(rank, ckpt_path, world_size, is_half, batch_size):
 				unit_emb = normalize(emb)
 				predicts.append((unit_emb, doc_id))
 	
-	with open('shared/pred_{}.pickle'.format(rank), 'wb') as fp:
+	with open('shared/pred_{}.pickle'.format(offset + rank), 'wb') as fp:
 		pickle.dump(predicts, fp)
 
 def combine_predict():
@@ -108,32 +118,44 @@ def embedding(args):
 	ckpt_path = 'embedding_model.ckpt'
 	if not os.path.exists('embedding'):
 		os.makedirs('embedding')
-	if not os.path.exists('embedding/query'):
-		query_dataset = get_embedding_dataset(args, 'query')
-		refresh_dir('shared')
+	if not os.path.exists('embedding/query.pickle'):
+		print('start to process query embedding', flush=True)
+		if args['gpu_offset'] == 0:
+			query_dataset = get_embedding_dataset(args, 'query')
+			refresh_dir('shared')
+			with open('shared/dataset.pickle', 'wb') as fp:
+				pickle.dump(query_dataset, fp)
 		mp.spawn(
 					sub_embedding, 
-					args=(ckpt_path, args['n_gpu'], False, args['batch_size']), 
-					nproc=args['n_gpu'], 
+					args=(args['gpu_offset'], ckpt_path, args['n_gpu'], False, args['batch_size']), 
+					nprocs=args['node_gpus'], 
 					join=True
 				)
-		predict = combine_predict()
-		with open('embedding/query.pickle', 'wb') as fp:
-			pickle.dump(predict, fp)
+		if args['gpu_offset'] == 0:
+			predict = combine_predict()
+			with open('embedding/query.pickle', 'wb') as fp:
+				pickle.dump(predict, fp)
 	
-	n_part = os.listdir('embedding_tokenize')
-	for pid in tqdm(range(n_part), leave=False, position=0, 'total'):
-		part_dataset = get_embedding_dataset(args, pid)
-		refresh_dir('shared')
+	n_part = len(os.listdir('embedding_tokenize'))
+	for pid in tqdm(range(n_part), leave=False, position=0, desc='total'):
+		if os.path.exists('embedding/part_{}.pickle'.format(pid)):
+			continue
+		print('start to process part {}/{} file'.format(pid + 1, n_part), flush=True)
+		if args['gpu_offset'] == 0:
+			part_dataset = get_embedding_dataset(args, pid)
+			refresh_dir('shared')
+			with open('shared/dataset.pickle', 'wb') as fp:
+				pickle.dump(part_dataset, fp)
 		mp.spawn(
 					sub_embedding, 
-					args=(ckpt_path, args['n_gpu'], False, args['batch_size']), 
-					nproc=args['n_gpu'], 
+					args=(args['gpu_offset'] , ckpt_path, args['n_gpu'], False, args['batch_size']), 
+					nprocs=args['node_gpus'], 
 					join=True
 				)
-		predict = combine_predict()
-		with open('embedding/part_{}.pickle'.format(pid), 'wb') as fp:
-			pickle.dump(predict, fp)
+		if args['gpu_offset'] == 0:
+			predict = combine_predict()
+			with open('embedding/part_{}.pickle'.format(pid), 'wb') as fp:
+				pickle.dump(predict, fp)
 
 def train(args):
 	seed_everything(args['seed'], workers=True)
@@ -174,6 +196,8 @@ def train(args):
 	trainer.fit(model, train_dataloader)
 
 if __name__ == '__main__':
+	gpu_status = torch.cuda.is_available()
+	print('GPU Status: ', gpu_status)
 	config = get_config()
 	if config['mode'] == 'train':
 		train(config)
