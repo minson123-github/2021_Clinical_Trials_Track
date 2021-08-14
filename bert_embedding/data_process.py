@@ -80,6 +80,16 @@ def sample_non_relevant(args, relevant_ids, file_ids):
 			break
 	return non_relevant_ids
 
+def sample_from_elastic(args, relevant_ids, elastic_ids):
+	relevant_id_set = set(relevant_ids)
+	target_size = int(len(relevant_ids) * args['sample_ratio'])
+	non_relevant_ids = []
+	for fid in elastic_ids:
+		if fid not in relevant_id_set and target_size > 0:
+			target_size -= 1
+			non_relevant_ids.append(fid)
+	return non_relevant_ids
+
 def refresh_dir(_dir):
 	if not os.path.exists(_dir):
 		os.mkdir(_dir)
@@ -180,6 +190,99 @@ def train_collate_fn(batch):
 def embedding_collate_fn(batch):
 	batch_input_ids, batch_doc_ids = zip(*batch)
 	return torch.stack(batch_input_ids), batch_doc_ids
+
+def get_elastic_dataloader(args):
+	random.seed(args['seed'])
+	query_terms_list = os.listdir(args['query_parsed'])
+	query_terms_list = sorted(query_terms_list, key=lambda filename: int(filename))
+	query_terms = []
+	for query_file in query_terms_list:
+		file_path = os.path.join(args['query_parsed'], query_file)
+		with open(file_path, 'r') as fp:
+			query_terms.append(fp.readline())
+	
+	relevance_ids = []
+	with open(args['relevance_id'], 'r') as fp:
+		relevance_info = fp.readlines()
+		for info in relevance_info:
+			relevance_ids.append(info[:-1].split(' '))
+	
+	elastic_ids = []
+	with open(args['elastic_result'], 'r') as fp:
+		elastic_results = fp.readlines()
+		for result in elastic_results:
+			elastic_ids.append(result.split(' ')[:6000])
+	
+	n_query = len(query_terms_list)
+	if not check_dir('tokenize', n_query):
+		if not check_dir('relevant', n_query) or not check_dir('non-relevant', n_query):
+			file_ids = get_file_ids(args)
+			refresh_dir('relevant')
+			refresh_dir('non-relevant')
+			for i in tqdm(range(n_query), position=0, leave=False, desc='write-relevance'):
+				non_relevance_ids = sample_from_elastic(args, relevance_ids[i], elastic_ids[i])
+				request_file_content(args, relevance_ids[i], 'relevant/part_{}.json'.format(i))
+				request_file_content(args, non_relevance_ids, 'non-relevant/part_{}.json'.format(i))
+		
+		tokenizer = RobertaTokenizerFast.from_pretrained(
+						args['pretrained_model'], 
+						model_max_length=GLOBAL_MAX_POS, 
+						bos_token='<s>', 
+						eos_token='</s>', 
+						unk_token='<unk>', 
+						sep_token='</s>', 
+						pad_token='<pad>', 
+						cls_token='<s>', 
+						mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
+					)
+
+		refresh_dir('tokenize')
+		part_idx = 0
+		with ProcessPoolExecutor(max_workers=args['n_worker']) as executor:
+			while part_idx < n_query:
+				futures = []
+				for worker_id in range(args['n_worker']):
+					future = executor.submit(train_dataset_tokenize, tokenizer, query_terms[part_idx], worker_id, part_idx)
+					part_idx += 1
+					futures.append(future)
+					if part_idx == n_query:
+						break
+				for future in futures:
+					future.result()
+	
+	if not os.path.exists('train_dataset.pickle'):
+		tokenize = {'input_ids':[], 'query_input_ids':[], 'target':[]}
+		for i in tqdm(range(n_query), position=0, leave=False, desc='combine'):
+			with open('tokenize/part_{}.json'.format(i), 'r') as fp:
+				part = json.load(fp)
+			for input_ids, query_input_ids, target in zip(part['input_ids'], part['query_input_ids'], part['target']):
+				if random.random() <= args['train_dataset_ratio']:
+					tokenize['input_ids'].append(input_ids)
+					tokenize['query_input_ids'].append(query_input_ids)
+					tokenize['target'].append(target)
+			# break
+		train_dataset = trainDataset(
+						tokenize['input_ids'], 
+						tokenize['query_input_ids'], 
+						tokenize['target']
+					)
+		with open('train_dataset.pickle', 'wb') as fp:
+			pickle.dump(train_dataset, fp)
+	else:
+		with open('train_dataset.pickle', 'rb') as fp:
+			train_dataset = pickle.load(fp)
+	
+	train_dataloader = DataLoader(
+						train_dataset, 
+						batch_size=args['batch_size'], 
+						shuffle=True, 
+						num_workers=4 * args['n_gpu'], 
+						pin_memory=True, 
+						persistent_workers=True, 
+						collate_fn=train_collate_fn
+					)
+	return train_dataloader
+	
 
 def get_train_dataloader(args):
 	random.seed(args['seed'])
@@ -325,6 +428,66 @@ def get_embedding_dataset(args, pid):
 		with open('embedding_tokenize/part_{}.json'.format(pid), 'r') as fp:
 			tokenize = json.load(fp)	
 	
+	embedding_dataset = embeddingDataset(
+							tokenize['input_ids'], 
+							tokenize['doc_id']
+						)
+
+	return embedding_dataset
+
+def get_partial_dataset(args, pid):
+	tokenizer = RobertaTokenizerFast.from_pretrained(
+					args['pretrained_model'], 
+					model_max_length=GLOBAL_MAX_POS, 
+					bos_token='<s>', 
+					eos_token='</s>', 
+					unk_token='<unk>', 
+					sep_token='</s>', 
+					pad_token='<pad>', 
+					cls_token='<s>', 
+					mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
+				)
+
+	tokenize = {'doc_id': [], 'input_ids': []}
+	if pid == 'query':
+		with open('sample/query/1', 'r') as fp:
+			query_term = fp.readline()
+
+		query_input_ids = tokenizer(
+							query_term, 
+							padding='max_length', 
+							truncation=True, 
+							stride=256, 
+							return_tensors='np', 
+							return_overflowing_tokens=True
+						).input_ids
+
+		for input_ids in query_input_ids:
+			tokenize['doc_id'].append('1')
+			tokenize['input_ids'].append(input_ids.tolist())
+	else:
+		if os.path.exists('embedding_tokenize/doc.pickle'):
+			with open('embedding_tokenize/doc.pickle', 'rb') as fp:
+				tokenize = pickle.load(fp)
+		else:
+			with open('sample/data/1', 'r') as fp:
+				file_contents = fp.readlines()
+			for i in tqdm(range(0, len(file_contents), 2), position=0, leave=False, desc='tokenize'):
+				file_id, file_cont = file_contents[i][:-1], file_contents[i + 1][:-1]
+				file_input_ids = tokenizer(
+									file_cont, 
+									padding='max_length', 
+									truncation=True, 
+									stride=256, 
+									return_tensors='np', 
+									return_overflowing_tokens=True
+								).input_ids
+				for input_ids in file_input_ids:
+					tokenize['doc_id'].append(file_id)
+					tokenize['input_ids'].append(input_ids.tolist())
+			with open('embedding_tokenize/doc.pickle', 'wb') as fp:
+				pickle.dump(tokenize, fp)
+
 	embedding_dataset = embeddingDataset(
 							tokenize['input_ids'], 
 							tokenize['doc_id']

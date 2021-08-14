@@ -4,7 +4,7 @@ import torch
 import pickle
 from tqdm import tqdm
 from config import get_config
-from data_process import get_train_dataloader, get_embedding_dataset, refresh_dir, embedding_collate_fn
+from data_process import get_elastic_dataloader, get_embedding_dataset, refresh_dir, embedding_collate_fn, get_partial_dataset
 from pytorch_lightning import Trainer, seed_everything, Callback
 from model import embeddingNet
 from pytorch_lightning.plugins.training_type import DDPShardedPlugin
@@ -51,7 +51,7 @@ def sub_embedding(rank, offset, ckpt_path, world_size, is_half, batch_size):
 
 	model = embeddingNet.load_from_checkpoint(ckpt_path)
 	#if is_half:
-	model.half()
+	#model.half()
 	model.to(device)
 	# print('Setting DDP...', flush=True)
 	model = DDP(model, device_ids=[rank], output_device=rank)
@@ -80,6 +80,7 @@ def sub_embedding(rank, offset, ckpt_path, world_size, is_half, batch_size):
 			for emb, doc_id in zip(embeddings, doc_ids):
 				unit_emb = normalize(emb)
 				predicts.append((unit_emb, doc_id))
+			dist.barrier()
 	
 	with open('shared/pred_{}.pickle'.format(offset + rank), 'wb') as fp:
 		pickle.dump(predicts, fp)
@@ -113,6 +114,50 @@ def combine_predict():
 		d = n_seq[k]
 		result[k] = [x / d for x in v]
 	return result
+
+def partial_embedding(args):
+	ckpt_path = 'embedding_model.ckpt'
+	if not os.path.exists('embedding'):
+		os.makedirs('embedding')
+	if not os.path.exists('embedding/query.pickle'):
+		print('start to process query embedding', flush=True)
+		if args['gpu_offset'] == 0:
+			query_dataset = get_partial_dataset(args, 'query')
+			refresh_dir('shared')
+			with open('shared/dataset.pickle', 'wb') as fp:
+				pickle.dump(query_dataset, fp)
+		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
+			os.remove('/home/mxshi/ddp-shared/sharedfile')
+		mp.spawn(
+					sub_embedding, 
+					args=(args['gpu_offset'], ckpt_path, args['n_gpu'], False, args['batch_size']), 
+					nprocs=args['node_gpus'], 
+					join=True
+				)
+		if args['gpu_offset'] == 0:
+			predict = combine_predict()
+			with open('embedding/query.pickle', 'wb') as fp:
+				pickle.dump(predict, fp)
+	
+	if not os.path.exists('embedding/doc.pickle'):
+		print('start to process document embedding', flush=True)
+		if args['gpu_offset'] == 0:
+			query_dataset = get_partial_dataset(args, 'doc')
+			refresh_dir('shared')
+			with open('shared/dataset.pickle', 'wb') as fp:
+				pickle.dump(query_dataset, fp)
+		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
+			os.remove('/home/mxshi/ddp-shared/sharedfile')
+		mp.spawn(
+					sub_embedding, 
+					args=(args['gpu_offset'], ckpt_path, args['n_gpu'], False, args['batch_size']), 
+					nprocs=args['node_gpus'], 
+					join=True
+				)
+		if args['gpu_offset'] == 0:
+			predict = combine_predict()
+			with open('embedding/doc.pickle', 'wb') as fp:
+				pickle.dump(predict, fp)
 
 def embedding(args):
 	ckpt_path = 'embedding_model.ckpt'
@@ -172,7 +217,7 @@ def train(args):
 	
 	# model = embeddingNet(args['pretrained_model'], args['lr'])
 	model = embeddingNet.load_from_checkpoint(os.path.join(args['model_dir'], 'checkpoints', 'checkpoint_2.ckpt'))
-	train_dataloader = get_train_dataloader(args)
+	train_dataloader = get_elastic_dataloader(args)
 
 	trainer = Trainer(
 					deterministic=True, 
@@ -203,3 +248,5 @@ if __name__ == '__main__':
 		train(config)
 	if config['mode'] == 'embedding':
 		embedding(config)
+	if config['mode'] == 'partial':
+		partial_embedding(config)
