@@ -1,6 +1,9 @@
 import torch
 import pytorch_lightning as pl
 from long_transformers import RobertaLongForMaskedLM
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed.runtime.fp16.onebit.adam import OnebitAdam
+from fairscale.optim import OSS
 
 class embeddingNet(pl.LightningModule):
 	
@@ -34,7 +37,9 @@ class embeddingNet(pl.LightningModule):
 		preds = self.forward(input_ids)
 		emb = [[x.item() for x in pred] for pred in preds]
 		return emb, doc_id
-	
+
 	def configure_optimizers(self):
 		optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
+		#return OnebitAdam(self.parameters(), lr=self.lr)
+		# optimizer = OSS(self.parameters(), optim=torch.optim.AdamW, lr=self.lr)
 		return optimizer

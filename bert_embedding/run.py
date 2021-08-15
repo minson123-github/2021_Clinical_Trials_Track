@@ -8,6 +8,7 @@ from data_process import get_elastic_dataloader, get_embedding_dataset, refresh_
 from pytorch_lightning import Trainer, seed_everything, Callback
 from model import embeddingNet
 from pytorch_lightning.plugins.training_type import DDPShardedPlugin
+from pytorch_lightning.plugins import DeepSpeedPlugin
 import torch.distributed as dist
 
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -30,7 +31,7 @@ class CheckpointEveryNSteps(Callback):
 		global_step = trainer.global_step
 		if (global_step + 1) % self.save_freq == 0:
 			self.save_cnt += 1
-			filename = 'checkpoint1_{}.ckpt'.format(self.save_cnt)
+			filename = 'checkpoint_{}.ckpt'.format(self.save_cnt)
 			ckpt_path = os.path.join(self.save_dir, filename)
 			trainer.save_checkpoint(ckpt_path)
 
@@ -215,8 +216,8 @@ def train(args):
 		if not os.path.exists(os.path.join(args['model_dir'], 'checkpoints')):
 			os.makedirs(os.path.join(args['model_dir'], 'checkpoints'))
 	
-	# model = embeddingNet(args['pretrained_model'], args['lr'])
-	model = embeddingNet.load_from_checkpoint(os.path.join(args['model_dir'], 'checkpoints', 'checkpoint_2.ckpt'))
+	model = embeddingNet(args['pretrained_model'], args['lr'])
+	#model = embeddingNet.load_from_checkpoint('embedding_model.ckpt')
 	train_dataloader = get_elastic_dataloader(args)
 
 	trainer = Trainer(
@@ -227,7 +228,11 @@ def train(args):
 					num_nodes=1, 
 					# precision=16, 
 					accelerator="ddp", 
-					plugins="ddp_sharded", 
+					# amp_backend='apex', 
+					# plugins='deepspeed_stage_2', 
+					plugins='ddp_sharded', 
+					# accumulate_grad_batches=16, 
+					# plugins=DeepSpeedPlugin(deepspeed_config), 
 					callbacks = callbacks, 
 				)
 
@@ -238,6 +243,8 @@ def train(args):
 	model.hparams.lr = new_lr
 	'''
 	print('The learning rate be used for training is: ', model.lr, flush=True)
+	
+	# model.hparams.lr = args['lr']
 	trainer.fit(model, train_dataloader)
 
 if __name__ == '__main__':

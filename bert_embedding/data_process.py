@@ -63,6 +63,27 @@ def request_file_content(args, file_id_list, save_path):
 	with open(save_path, 'w') as fp:
 		json.dump(request_contents, fp)
 
+def request_multi_file_content(args, file_ids_lists, save_paths):
+	file_id_sets = [set(id_list) for id_list in file_ids_lists]
+	file_list = os.listdir(args['file_content'])
+	request_contents = [None] * len(save_paths)
+	for i in range(len(save_paths)):
+		request_contents[i] = []
+	
+	for filename in tqdm(file_list, position=0, desc='Get content'):
+		file_path = os.path.join(args['file_content'], filename)
+		with open(file_path, 'r') as fp:
+			file_contents = fp.readlines()
+		for i in range(0, len(file_contents), 2):
+			file_id, file_content = file_contents[i][:-1], file_contents[i + 1][:-1]
+			for pid in range(len(save_paths)):
+				if file_id in file_id_sets[pid]:
+					request_contents[pid].append(file_content)
+	
+	for pid in range(len(save_paths)):
+		with open(save_paths[pid], 'w') as fp:
+			json.dump(request_contents[pid], fp)
+
 def sample_non_relevant(args, relevant_ids, file_ids):
 	relevant_id_set = set(relevant_ids)
 	target_size = int(len(relevant_ids) * args['sample_ratio'])
@@ -211,7 +232,7 @@ def get_elastic_dataloader(args):
 	with open(args['elastic_result'], 'r') as fp:
 		elastic_results = fp.readlines()
 		for result in elastic_results:
-			elastic_ids.append(result.split(' ')[:6000])
+			elastic_ids.append(result.split(' ')[:10000])
 	
 	n_query = len(query_terms_list)
 	if not check_dir('tokenize', n_query):
@@ -219,10 +240,15 @@ def get_elastic_dataloader(args):
 			file_ids = get_file_ids(args)
 			refresh_dir('relevant')
 			refresh_dir('non-relevant')
+			non_relevance_ids = []
+			relevance_paths, non_relevance_paths = [], []
 			for i in tqdm(range(n_query), position=0, leave=False, desc='write-relevance'):
-				non_relevance_ids = sample_from_elastic(args, relevance_ids[i], elastic_ids[i])
-				request_file_content(args, relevance_ids[i], 'relevant/part_{}.json'.format(i))
-				request_file_content(args, non_relevance_ids, 'non-relevant/part_{}.json'.format(i))
+				non_relevance = sample_from_elastic(args, relevance_ids[i], elastic_ids[i])
+				non_relevance_ids.append(non_relevance)
+				relevance_paths.append('relevant/part_{}.json'.format(i))
+				non_relevance_paths.append('non-relevant/part_{}.json'.format(i))
+			request_multi_file_content(args, relevance_ids, relevance_paths)
+			request_multi_file_content(args, non_relevance_ids, non_relevance_paths)
 		
 		tokenizer = RobertaTokenizerFast.from_pretrained(
 						args['pretrained_model'], 
@@ -276,9 +302,10 @@ def get_elastic_dataloader(args):
 						train_dataset, 
 						batch_size=args['batch_size'], 
 						shuffle=True, 
-						num_workers=4 * args['n_gpu'], 
+						# num_workers=4 * args['n_gpu'], 
+						num_workers=os.cpu_count(), 
 						pin_memory=True, 
-						persistent_workers=True, 
+						# persistent_workers=True, 
 						collate_fn=train_collate_fn
 					)
 	return train_dataloader

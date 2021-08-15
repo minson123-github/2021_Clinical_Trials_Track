@@ -21,6 +21,6 @@ def get_config():
 	parser.add_argument('--batch_size', type=int, help='Batch size for training.')
 	parser.add_argument('--gpu_offset', type=int, default=0, help='GPU offset in other server.')
 	parser.add_argument('--node_gpus', type=int, default=1, help='Number of GPU in current node.')
-	parser.add_argument('--elasic_result', type=str, default='elastic2016.txt', help='elastic search result.')
+	parser.add_argument('--elastic_result', type=str, default='elastic2016.txt', help='elastic search result.')
 	args = parser.parse_args()
 	return vars(args)
