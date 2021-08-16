@@ -12,7 +12,7 @@ def get_config():
 	parser.add_argument('--n_worker', type=int, default=1, help='Number of workers for tokenize.')
 	parser.add_argument('--model_dir', type=str, help='The directory for saving model and checkpoints.')
 	parser.add_argument('--saving_steps', type=int, help='Number of training steps to save checkpoint.')
-	parser.add_argument('--pretrained_model', type=str, default='simonlevine/bioclinical-roberta-long', help='The pretrained model for fine-tuning.')
+	parser.add_argument('--pretrained_model', type=str, default='bionlp/bluebert_pubmed_uncased_L-24_H-1024_A-16', help='The pretrained model for fine-tuning.')
 	parser.add_argument('--n_gpu', type=int, default=1, help='Number of GPU be used in training.')
 	parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate for training.')
 	parser.add_argument('--n_epoch', type=int, default=1, help='Number of epoch for training.')

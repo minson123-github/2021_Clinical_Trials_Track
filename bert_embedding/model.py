@@ -1,35 +1,39 @@
 import torch
 import pytorch_lightning as pl
-from long_transformers import RobertaLongForMaskedLM
+from transformers import BertForMaskedLM
+'''
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.fp16.onebit.adam import OnebitAdam
 from fairscale.optim import OSS
+'''
 
 class embeddingNet(pl.LightningModule):
 	
 	def __init__(self, pretrained_model, lr):
 		super().__init__()
-		self.emb_net = RobertaLongForMaskedLM.from_pretrained(pretrained_model, output_hidden_states=True, gradient_checkpointing=True)
+		self.embedding = BertForMaskedLM.from_pretrained(pretrained_model, output_hidden_states=True, gradient_checkpointing=True)
 		self.lr = lr
 		self.save_hyperparameters()
-		self.cosine_loss = torch.nn.CosineEmbeddingLoss()
+		self.TripletLoss = torch.nn.TripletMarginWithDistanceLoss(distance_function=torch.nn.CosineSimilarity(), margin=0.6)
 	
 	def forward(self, input_ids):
-		emb = self.emb_net(input_ids=input_ids, output_hidden_states=True)[1][-1][:, 0, :]
+		emb = self.embedding(input_ids=input_ids, output_hidden_states=True).hidden_states[-1][:, 0, :]
 		return emb
 	
 	def training_step(self, batch, batch_idx):
-		input_ids, query_input_ids, target = batch
-		para_emb = self.forward(input_ids)
-		query_emb = self.forward(query_input_ids)
-		loss = self.cosine_loss(para_emb, query_emb, target)
+		anchor, positive, negative = batch
+		anchor_emb = self.forward(anchor)
+		positive_emb = self.forward(positive)
+		negative_emb = self.forward(negative)
+		loss = self.TripletLoss(anchor_emb, negative_emb, positive_emb)
 		return loss
 	
 	def validation_step(self, batch, batch_idx):
-		input_ids, query_input_ids, target = batch
-		para_emb = self.forward(input_ids)
-		query_emb = self.forward(query_input_ids)
-		loss = self.cosine_loss(para_emb, query_emb, target)
+		anchor, positive, negative = batch
+		anchor_emb = self.forward(anchor)
+		positive_emb = self.forward(positive)
+		negative_emb = self.forward(negative)
+		loss = self.TripletLoss(anchor_emb, negative_emb, positive_emb)
 		return loss
 	
 	def predict_step(self, batch, batch_idx):

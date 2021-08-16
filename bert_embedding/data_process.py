@@ -6,23 +6,23 @@ import random
 import pickle
 from tqdm import tqdm
 from tokenizers import AddedToken
-from transformers import RobertaTokenizerFast
+from transformers import BertTokenizerFast
 from torch.utils.data import Dataset, DataLoader
 from concurrent.futures import ProcessPoolExecutor
 
-GLOBAL_MAX_POS = 4096
+# GLOBAL_MAX_POS = 4096
 
 class trainDataset(Dataset):
-	def __init__(self, input_ids, query_input_ids, target):
-		self.input_ids = torch.LongTensor(input_ids)
-		self.query_input_ids = torch.LongTensor(query_input_ids)
-		self.target = torch.FloatTensor(target)
+	def __init__(self, anchor, positive, negative):
+		self.anchor = torch.LongTensor(anchor)
+		self.positive = torch.LongTensor(positive)
+		self.negative = torch.LongTensor(negative)
 	
 	def __len__(self):
-		return len(self.input_ids)
+		return len(self.anchor)
 
 	def __getitem__(self, idx):
-		return self.input_ids[idx], self.query_input_ids[idx], self.target[idx]
+		return self.anchor[idx], self.positive[idx], self.negative[idx]
 
 class embeddingDataset(Dataset):
 	def __init__(self, input_ids, doc_id):
@@ -160,13 +160,13 @@ def train_dataset_tokenize(tokenizer, query_terms, worker_id, part_id):
 	with open('non-relevant/part_{}.json'.format(part_id), 'r') as fp:
 		non_relevant = json.load(fp)
 	
-	results = {'input_ids': [], 'query_input_ids': [], 'target': []}
+	results = {'positive': [], 'negative': []}
 
 	query_input_ids = tokenizer(
 						query_terms, 
 						padding='max_length', 
 						truncation=True,
-						stride=256, 
+						stride=64, 
 						return_tensors='np', 
 						return_overflowing_tokens=True
 					).input_ids
@@ -176,37 +176,40 @@ def train_dataset_tokenize(tokenizer, query_terms, worker_id, part_id):
 							para, 
 							padding='max_length', 
 							truncation=True,
-							stride=256, 
+							stride=64, 
 							return_tensors='np', 
 							return_overflowing_tokens=True
 						).input_ids
 
 		for input_ids in para_input_ids:
-			results['input_ids'].append(input_ids.tolist())
-			results['query_input_ids'].append(query_input_ids[0].tolist())
-			results['target'].append(1)
+			results['positive'].append(input_ids.tolist())
 	
 	for para in tqdm(non_relevant, position=worker_id, leave=False, desc='non-relevant'):
 		para_input_ids = tokenizer(
 							para, 
 							padding='max_length', 
 							truncation=True, 
-							stride=256, 
+							stride=64, 
 							return_tensors='np', 
 							return_overflowing_tokens=True
 						).input_ids
 
 		for input_ids in para_input_ids:
-			results['input_ids'].append(input_ids.tolist())
-			results['query_input_ids'].append(query_input_ids[0].tolist())
-			results['target'].append(-1)
+			results['negative'].append(input_ids.tolist())
+	
+	sub_data = {'anchor': [], 'positive': [], 'negative': []}
+	for input_ids in query_input_ids:
+		for positive, negative in zip(results['positive'], results['negative']):
+			sub_data['anchor'].append(input_ids.tolist())
+			sub_data['positive'].append(positive)
+			sub_data['negative'].append(negative)
 	
 	with open('tokenize/part_{}.json'.format(part_id), 'w') as fp:
-		json.dump(results, fp)
+		json.dump(sub_data, fp)
 
 def train_collate_fn(batch):
-	batch_input_ids, batch_query_input_ids, batch_target = zip(*batch)
-	return torch.stack(batch_input_ids), torch.stack(batch_query_input_ids), torch.stack(batch_target)
+	batch_anchor, batch_positive, batch_negative = zip(*batch)
+	return torch.stack(batch_anchor), torch.stack(batch_positive), torch.stack(batch_negative)
 
 def embedding_collate_fn(batch):
 	batch_input_ids, batch_doc_ids = zip(*batch)
@@ -237,7 +240,7 @@ def get_elastic_dataloader(args):
 	n_query = len(query_terms_list)
 	if not check_dir('tokenize', n_query):
 		if not check_dir('relevant', n_query) or not check_dir('non-relevant', n_query):
-			file_ids = get_file_ids(args)
+			# file_ids = get_file_ids(args)
 			refresh_dir('relevant')
 			refresh_dir('non-relevant')
 			non_relevance_ids = []
@@ -250,17 +253,7 @@ def get_elastic_dataloader(args):
 			request_multi_file_content(args, relevance_ids, relevance_paths)
 			request_multi_file_content(args, non_relevance_ids, non_relevance_paths)
 		
-		tokenizer = RobertaTokenizerFast.from_pretrained(
-						args['pretrained_model'], 
-						model_max_length=GLOBAL_MAX_POS, 
-						bos_token='<s>', 
-						eos_token='</s>', 
-						unk_token='<unk>', 
-						sep_token='</s>', 
-						pad_token='<pad>', 
-						cls_token='<s>', 
-						mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
-					)
+		tokenizer = BertTokenizerFast.from_pretrained(args['pretrained_model'], model_max_length=512)
 
 		refresh_dir('tokenize')
 		part_idx = 0
@@ -277,20 +270,21 @@ def get_elastic_dataloader(args):
 					future.result()
 	
 	if not os.path.exists('train_dataset.pickle'):
-		tokenize = {'input_ids':[], 'query_input_ids':[], 'target':[]}
+		tokenize = {'anchor':[], 'positive':[], 'negative':[]}
 		for i in tqdm(range(n_query), position=0, leave=False, desc='combine'):
 			with open('tokenize/part_{}.json'.format(i), 'r') as fp:
 				part = json.load(fp)
-			for input_ids, query_input_ids, target in zip(part['input_ids'], part['query_input_ids'], part['target']):
+			for anchor, positive, negative in zip(part['anchor'], part['positive'], part['negative']):
 				if random.random() <= args['train_dataset_ratio']:
-					tokenize['input_ids'].append(input_ids)
-					tokenize['query_input_ids'].append(query_input_ids)
-					tokenize['target'].append(target)
+					tokenize['anchor'].append(anchor)
+					tokenize['positive'].append(positive)
+					tokenize['negative'].append(negative)
+			print(len(tokenize['positive']), len(tokenize['positive'][0]))
 			# break
 		train_dataset = trainDataset(
-						tokenize['input_ids'], 
-						tokenize['query_input_ids'], 
-						tokenize['target']
+						tokenize['anchor'], 
+						tokenize['positive'], 
+						tokenize['negative']
 					)
 		with open('train_dataset.pickle', 'wb') as fp:
 			pickle.dump(train_dataset, fp)
@@ -302,14 +296,12 @@ def get_elastic_dataloader(args):
 						train_dataset, 
 						batch_size=args['batch_size'], 
 						shuffle=True, 
-						# num_workers=4 * args['n_gpu'], 
-						num_workers=os.cpu_count(), 
+						num_workers=4 * args['n_gpu'], 
 						pin_memory=True, 
-						# persistent_workers=True, 
+						persistent_workers=True, 
 						collate_fn=train_collate_fn
 					)
 	return train_dataloader
-	
 
 def get_train_dataloader(args):
 	random.seed(args['seed'])

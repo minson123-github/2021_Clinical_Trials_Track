@@ -31,7 +31,7 @@ class CheckpointEveryNSteps(Callback):
 		global_step = trainer.global_step
 		if (global_step + 1) % self.save_freq == 0:
 			self.save_cnt += 1
-			filename = 'checkpoint_{}.ckpt'.format(self.save_cnt)
+			filename = '0checkpoint_{}.ckpt'.format(self.save_cnt)
 			ckpt_path = os.path.join(self.save_dir, filename)
 			trainer.save_checkpoint(ckpt_path)
 
