@@ -142,7 +142,7 @@ def embedding_dataset_tokenize(tokenizer, file_path, worker_id, part_id):
 						file_content, 
 						padding='max_length', 
 						truncation=True,
-						stride=256, 
+						stride=64, 
 						return_tensors='np', 
 						return_overflowing_tokens=True
 					).input_ids
@@ -393,17 +393,7 @@ def get_embedding_dataset(args, pid):
 	file_list = os.listdir(args['file_content'])
 	file_list = sorted(file_list, key=lambda filename: int(filename))
 	print('Number of file part: {}'.format(len(file_list)), flush=True)
-	tokenizer = RobertaTokenizerFast.from_pretrained(
-					args['pretrained_model'], 
-					model_max_length=GLOBAL_MAX_POS, 
-					bos_token='<s>', 
-					eos_token='</s>', 
-					unk_token='<unk>', 
-					sep_token='</s>', 
-					pad_token='<pad>', 
-					cls_token='<s>', 
-					mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
-				)
+	tokenizer = BertTokenizerFast.from_pretrained(args['pretrained_model'], model_max_length=512)
 
 	if not check_dir('embedding_tokenize', len(file_list)):
 		refresh_dir('embedding_tokenize')
@@ -435,14 +425,14 @@ def get_embedding_dataset(args, pid):
 								query_term, 
 								padding='max_length', 
 								truncation=True, 
-								stride=256, 
+								stride=64, 
 								return_tensors='np', 
 								return_overflowing_tokens=True
 							).input_ids
 
 			for input_ids in query_input_ids:
 				tokenize['doc_id'].append(query_file)
-				tokenize['input_ids'].append(input_ids)
+				tokenize['input_ids'].append(input_ids.tolist())
 	else:
 		with open('embedding_tokenize/part_{}.json'.format(pid), 'r') as fp:
 			tokenize = json.load(fp)	
@@ -455,17 +445,7 @@ def get_embedding_dataset(args, pid):
 	return embedding_dataset
 
 def get_partial_dataset(args, pid):
-	tokenizer = RobertaTokenizerFast.from_pretrained(
-					args['pretrained_model'], 
-					model_max_length=GLOBAL_MAX_POS, 
-					bos_token='<s>', 
-					eos_token='</s>', 
-					unk_token='<unk>', 
-					sep_token='</s>', 
-					pad_token='<pad>', 
-					cls_token='<s>', 
-					mask_token=AddedToken("<mask>", rstrip=False, lstrip=True, single_word=False, normalized=False)
-				)
+	tokenizer = BertTokenizerFast.from_pretrained(args['pretrained_model'], model_max_length=512)
 
 	tokenize = {'doc_id': [], 'input_ids': []}
 	if pid == 'query':
@@ -476,7 +456,7 @@ def get_partial_dataset(args, pid):
 							query_term, 
 							padding='max_length', 
 							truncation=True, 
-							stride=256, 
+							stride=64, 
 							return_tensors='np', 
 							return_overflowing_tokens=True
 						).input_ids
@@ -497,7 +477,7 @@ def get_partial_dataset(args, pid):
 									file_cont, 
 									padding='max_length', 
 									truncation=True, 
-									stride=256, 
+									stride=64, 
 									return_tensors='np', 
 									return_overflowing_tokens=True
 								).input_ids

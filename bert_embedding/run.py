@@ -75,7 +75,7 @@ def sub_embedding(rank, offset, ckpt_path, world_size, is_half, batch_size):
 
 	predicts = []
 	with torch.no_grad():
-		for input_ids, doc_ids in tqdm(test_dataloader, position=rank + 1, leave=False, desc='GPU-{}'.format(rank)):
+		for input_ids, doc_ids in tqdm(test_dataloader, position=1, leave=False, desc='GPU-{}'.format(rank)):
 			preds = model(input_ids.cuda())
 			embeddings = [[x.item() for x in pred] for pred in preds]
 			for emb, doc_id in zip(embeddings, doc_ids):
@@ -86,7 +86,7 @@ def sub_embedding(rank, offset, ckpt_path, world_size, is_half, batch_size):
 	with open('shared/pred_{}.pickle'.format(offset + rank), 'wb') as fp:
 		pickle.dump(predicts, fp)
 
-def combine_predict():
+def combine_predict(dataset_length):
 	pred_files = []
 	for filename in os.listdir('shared'):
 		if filename[0:5] == 'pred_':
@@ -100,6 +100,8 @@ def combine_predict():
 			part_pred = pickle.load(fp)
 		for p in part_pred:
 			full_pred.append(p)
+	
+	full_pred = full_pred[: dataset_length]
 	
 	avg_emb, n_seq = {}, {}
 	for emb, doc_id in full_pred:
@@ -124,6 +126,8 @@ def partial_embedding(args):
 		print('start to process query embedding', flush=True)
 		if args['gpu_offset'] == 0:
 			query_dataset = get_partial_dataset(args, 'query')
+			dataset_length = len(query_dataset)
+			print('Length of dataset: {}'.format(dataset_length))
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(query_dataset, fp)
@@ -136,7 +140,7 @@ def partial_embedding(args):
 					join=True
 				)
 		if args['gpu_offset'] == 0:
-			predict = combine_predict()
+			predict = combine_predict(dataset_length)
 			with open('embedding/query.pickle', 'wb') as fp:
 				pickle.dump(predict, fp)
 	
@@ -144,6 +148,8 @@ def partial_embedding(args):
 		print('start to process document embedding', flush=True)
 		if args['gpu_offset'] == 0:
 			query_dataset = get_partial_dataset(args, 'doc')
+			dataset_length = len(query_dataset)
+			print('Length of dataset: {}'.format(dataset_length))
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(query_dataset, fp)
@@ -156,7 +162,7 @@ def partial_embedding(args):
 					join=True
 				)
 		if args['gpu_offset'] == 0:
-			predict = combine_predict()
+			predict = combine_predict(dataset_length)
 			with open('embedding/doc.pickle', 'wb') as fp:
 				pickle.dump(predict, fp)
 
@@ -168,9 +174,13 @@ def embedding(args):
 		print('start to process query embedding', flush=True)
 		if args['gpu_offset'] == 0:
 			query_dataset = get_embedding_dataset(args, 'query')
+			dataset_length = len(query_dataset)
+			print('Length of dataset: {}'.format(dataset_length))
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(query_dataset, fp)
+		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
+			os.remove('/home/mxshi/ddp-shared/sharedfile')
 		mp.spawn(
 					sub_embedding, 
 					args=(args['gpu_offset'], ckpt_path, args['n_gpu'], False, args['batch_size']), 
@@ -178,7 +188,7 @@ def embedding(args):
 					join=True
 				)
 		if args['gpu_offset'] == 0:
-			predict = combine_predict()
+			predict = combine_predict(dataset_length)
 			with open('embedding/query.pickle', 'wb') as fp:
 				pickle.dump(predict, fp)
 	
@@ -189,9 +199,13 @@ def embedding(args):
 		print('start to process part {}/{} file'.format(pid + 1, n_part), flush=True)
 		if args['gpu_offset'] == 0:
 			part_dataset = get_embedding_dataset(args, pid)
+			dataset_length = len(part_dataset)
+			print('Length of dataset: {}'.format(dataset_length))
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(part_dataset, fp)
+		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
+			os.remove('/home/mxshi/ddp-shared/sharedfile')
 		mp.spawn(
 					sub_embedding, 
 					args=(args['gpu_offset'] , ckpt_path, args['n_gpu'], False, args['batch_size']), 
@@ -199,7 +213,7 @@ def embedding(args):
 					join=True
 				)
 		if args['gpu_offset'] == 0:
-			predict = combine_predict()
+			predict = combine_predict(dataset_length)
 			with open('embedding/part_{}.pickle'.format(pid), 'wb') as fp:
 				pickle.dump(predict, fp)
 
