@@ -142,7 +142,7 @@ def embedding_dataset_tokenize(tokenizer, file_path, worker_id, part_id):
 						file_content, 
 						padding='max_length', 
 						truncation=True,
-						stride=64, 
+						stride=128, 
 						return_tensors='np', 
 						return_overflowing_tokens=True
 					).input_ids
@@ -425,7 +425,7 @@ def get_embedding_dataset(args, pid):
 								query_term, 
 								padding='max_length', 
 								truncation=True, 
-								stride=64, 
+								stride=128, 
 								return_tensors='np', 
 								return_overflowing_tokens=True
 							).input_ids

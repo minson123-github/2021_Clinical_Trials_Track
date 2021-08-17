@@ -17,8 +17,8 @@ import torch.multiprocessing as mp
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 # os.environ["MASTER_ADDR"] = "140.112.31.65"
-# os.environ["MASTER_ADDR"] = "127.0.0.1"
-# os.environ["MASTER_PORT"] = "25487"
+os.environ["MASTER_ADDR"] = "127.0.0.1"
+os.environ["MASTER_PORT"] = "25487"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
 class CheckpointEveryNSteps(Callback):
@@ -44,7 +44,7 @@ def sum_vec(vec1, vec2):
 	return [x + y for x, y in zip(vec1, vec2)]
 
 def sub_embedding(rank, offset, ckpt_path, world_size, is_half, batch_size):
-	torch.distributed.init_process_group('nccl', init_method='file:///home/mxshi/ddp-shared/sharedfile', rank=offset + rank, world_size=world_size)
+	torch.distributed.init_process_group('nccl', rank=offset + rank, world_size=world_size)
 	print('initial rank {} process'.format(torch.distributed.get_rank()), flush=True)
 	# dist.barrier()
 	torch.cuda.set_device(rank)
@@ -75,7 +75,7 @@ def sub_embedding(rank, offset, ckpt_path, world_size, is_half, batch_size):
 
 	predicts = []
 	with torch.no_grad():
-		for input_ids, doc_ids in tqdm(test_dataloader, position=1, leave=False, desc='GPU-{}'.format(rank)):
+		for input_ids, doc_ids in tqdm(test_dataloader, position=0, leave=False, desc='GPU-{}'.format(rank)):
 			preds = model(input_ids.cuda())
 			embeddings = [[x.item() for x in pred] for pred in preds]
 			for emb, doc_id in zip(embeddings, doc_ids):
@@ -131,8 +131,6 @@ def partial_embedding(args):
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(query_dataset, fp)
-		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
-			os.remove('/home/mxshi/ddp-shared/sharedfile')
 		mp.spawn(
 					sub_embedding, 
 					args=(args['gpu_offset'], ckpt_path, args['n_gpu'], False, args['batch_size']), 
@@ -153,8 +151,6 @@ def partial_embedding(args):
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(query_dataset, fp)
-		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
-			os.remove('/home/mxshi/ddp-shared/sharedfile')
 		mp.spawn(
 					sub_embedding, 
 					args=(args['gpu_offset'], ckpt_path, args['n_gpu'], False, args['batch_size']), 
@@ -179,8 +175,6 @@ def embedding(args):
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(query_dataset, fp)
-		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
-			os.remove('/home/mxshi/ddp-shared/sharedfile')
 		mp.spawn(
 					sub_embedding, 
 					args=(args['gpu_offset'], ckpt_path, args['n_gpu'], False, args['batch_size']), 
@@ -193,7 +187,7 @@ def embedding(args):
 				pickle.dump(predict, fp)
 	
 	n_part = len(os.listdir('embedding_tokenize'))
-	for pid in tqdm(range(n_part), leave=False, position=0, desc='total'):
+	for pid in range(n_part):
 		if os.path.exists('embedding/part_{}.pickle'.format(pid)):
 			continue
 		print('start to process part {}/{} file'.format(pid + 1, n_part), flush=True)
@@ -204,8 +198,6 @@ def embedding(args):
 			refresh_dir('shared')
 			with open('shared/dataset.pickle', 'wb') as fp:
 				pickle.dump(part_dataset, fp)
-		if os.path.exists('/home/mxshi/ddp-shared/sharedfile'):
-			os.remove('/home/mxshi/ddp-shared/sharedfile')
 		mp.spawn(
 					sub_embedding, 
 					args=(args['gpu_offset'] , ckpt_path, args['n_gpu'], False, args['batch_size']), 
